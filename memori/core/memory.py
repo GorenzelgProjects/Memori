@@ -3,6 +3,7 @@ Main Memori class - Pydantic-based memory interface v1.0
 """
 
 import asyncio
+import os
 import threading
 import time
 import uuid
@@ -161,6 +162,9 @@ class Memori:
         # Thread safety for conscious memory initialization
         self._conscious_init_lock = threading.RLock()
 
+        resolved_api_key = api_key or openai_api_key
+        vllm_base_url = os.getenv("VLLM_BASE_URL")
+
         # Configure provider based on explicit settings ONLY - no auto-detection
         if provider_config:
             # Use provided configuration
@@ -176,7 +180,7 @@ class Memori:
                 if azure_endpoint:
                     # Explicitly configured Azure
                     self.provider_config = ProviderConfig.from_azure(
-                        api_key=api_key or openai_api_key,
+                        api_key=resolved_api_key,
                         azure_endpoint=azure_endpoint,
                         azure_deployment=azure_deployment,
                         api_version=api_version,
@@ -185,10 +189,12 @@ class Memori:
                     )
                     logger.info("Using explicitly configured Azure OpenAI provider")
                 elif base_url:
+                    if not resolved_api_key:
+                        resolved_api_key = "not-required"
                     # Explicitly configured custom endpoint
                     self.provider_config = ProviderConfig.from_custom(
                         base_url=base_url,
-                        api_key=api_key or openai_api_key,
+                        api_key=resolved_api_key,
                         model=model,
                     )
                     logger.info(
@@ -197,7 +203,7 @@ class Memori:
                 else:
                     # Fallback to OpenAI with explicit settings
                     self.provider_config = ProviderConfig.from_openai(
-                        api_key=api_key or openai_api_key,
+                        api_key=resolved_api_key,
                         organization=organization,
                         project=project,
                         model=model,
@@ -213,15 +219,32 @@ class Memori:
             try:
                 from .providers import ProviderConfig
 
-                self.provider_config = ProviderConfig.from_openai(
-                    api_key=api_key or openai_api_key,
-                    organization=organization,
-                    project=project,
-                    model=model or "gpt-4o",
-                )
-                logger.info(
-                    "Using default OpenAI provider (no specific provider configured)"
-                )
+                if vllm_base_url:
+                    if not resolved_api_key:
+                        resolved_api_key = "not-required"
+                    self.provider_config = ProviderConfig.from_custom(
+                        base_url=vllm_base_url,
+                        api_key=resolved_api_key,
+                        model=model or os.getenv("VLLM_MODEL") or "gpt-4o",
+                    )
+                    logger.info(
+                        f"Using VLLM provider from VLLM_BASE_URL: {vllm_base_url}"
+                    )
+                elif resolved_api_key:
+                    self.provider_config = ProviderConfig.from_openai(
+                        api_key=resolved_api_key,
+                        organization=organization,
+                        project=project,
+                        model=model or "gpt-4o",
+                    )
+                    logger.info(
+                        "Using default OpenAI provider (no specific provider configured)"
+                    )
+                else:
+                    self.provider_config = None
+                    logger.info(
+                        "No API key configured; LLM agents disabled until a provider is set."
+                    )
             except ImportError:
                 logger.warning(
                     "ProviderConfig not available, using basic configuration"
@@ -229,7 +252,7 @@ class Memori:
                 self.provider_config = None
 
         # Keep backward compatibility
-        self.openai_api_key = api_key or openai_api_key or ""
+        self.openai_api_key = resolved_api_key or ""
         if self.provider_config and hasattr(self.provider_config, "api_key"):
             self.openai_api_key = self.provider_config.api_key or self.openai_api_key
 
@@ -256,62 +279,72 @@ class Memori:
         self._conscious_init_pending = False
 
         # Initialize agents with provider configuration
-        try:
-            from ..agents.memory_agent import MemoryAgent
-            from ..agents.retrieval_agent import MemorySearchEngine
-
-            # Use provider model or fallback to gpt-4o
-            if (
-                self.provider_config
-                and hasattr(self.provider_config, "model")
-                and self.provider_config.model
-            ):
-                effective_model = model or self.provider_config.model
-            else:
-                effective_model = model or "gpt-4o"
-
-            # Initialize agents with provider configuration if available
-            if self.provider_config:
-                self.memory_agent = MemoryAgent(
-                    provider_config=self.provider_config, model=effective_model
-                )
-                self.search_engine = MemorySearchEngine(
-                    provider_config=self.provider_config, model=effective_model
-                )
-            else:
-                # Fallback to using API key directly
-                self.memory_agent = MemoryAgent(
-                    api_key=self.openai_api_key, model=effective_model
-                )
-                self.search_engine = MemorySearchEngine(
-                    api_key=self.openai_api_key, model=effective_model
-                )
-
-            # Only initialize conscious_agent if conscious_ingest or auto_ingest is enabled
-            if conscious_ingest or auto_ingest:
-                self.conscious_agent = ConsciouscAgent()
-
+        if not self.provider_config and not self.openai_api_key:
             logger.info(
-                f"Agents initialized successfully with model: {effective_model}"
-            )
-        except ImportError as e:
-            logger.warning(
-                f"Failed to import LLM agents: {e}. Memory ingestion disabled."
+                "No API key or provider config available; skipping LLM agent initialization."
             )
             self.memory_agent = None
             self.search_engine = None
             self.conscious_agent = None
             self.conscious_ingest = False
             self.auto_ingest = False
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LLM agents: {e}. Memory ingestion disabled."
-            )
-            self.memory_agent = None
-            self.search_engine = None
-            self.conscious_agent = None
-            self.conscious_ingest = False
-            self.auto_ingest = False
+        else:
+            try:
+                from ..agents.memory_agent import MemoryAgent
+                from ..agents.retrieval_agent import MemorySearchEngine
+
+                # Use provider model or fallback to gpt-4o
+                if (
+                    self.provider_config
+                    and hasattr(self.provider_config, "model")
+                    and self.provider_config.model
+                ):
+                    effective_model = model or self.provider_config.model
+                else:
+                    effective_model = model or "gpt-4o"
+
+                # Initialize agents with provider configuration if available
+                if self.provider_config:
+                    self.memory_agent = MemoryAgent(
+                        provider_config=self.provider_config, model=effective_model
+                    )
+                    self.search_engine = MemorySearchEngine(
+                        provider_config=self.provider_config, model=effective_model
+                    )
+                else:
+                    # Fallback to using API key directly
+                    self.memory_agent = MemoryAgent(
+                        api_key=self.openai_api_key, model=effective_model
+                    )
+                    self.search_engine = MemorySearchEngine(
+                        api_key=self.openai_api_key, model=effective_model
+                    )
+
+                # Only initialize conscious_agent if conscious_ingest or auto_ingest is enabled
+                if conscious_ingest or auto_ingest:
+                    self.conscious_agent = ConsciouscAgent()
+
+                logger.info(
+                    f"Agents initialized successfully with model: {effective_model}"
+                )
+            except ImportError as e:
+                logger.warning(
+                    f"Failed to import LLM agents: {e}. Memory ingestion disabled."
+                )
+                self.memory_agent = None
+                self.search_engine = None
+                self.conscious_agent = None
+                self.conscious_ingest = False
+                self.auto_ingest = False
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize LLM agents: {e}. Memory ingestion disabled."
+                )
+                self.memory_agent = None
+                self.search_engine = None
+                self.conscious_agent = None
+                self.conscious_ingest = False
+                self.auto_ingest = False
 
         # State tracking
         self._enabled = False

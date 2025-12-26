@@ -222,12 +222,7 @@ class ConfigManager:
                 logger.error("Database connection string is required")
                 return False
 
-            # Validate API keys if conscious ingestion is enabled
-            if (
-                self._settings.agents.conscious_ingest
-                and not self._settings.agents.openai_api_key
-            ):
-                logger.warning("OpenAI API key is required for conscious ingestion")
+            # Conscious ingestion can run without a provider; no API key required here.
 
             logger.info("Configuration validation passed")
             return True

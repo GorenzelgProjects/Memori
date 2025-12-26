@@ -113,9 +113,7 @@ class AgentSettings(BaseModel):
 
     @validator("openai_api_key")
     def validate_api_key(cls, v):
-        """Validate OpenAI API key format"""
-        if v and not v.startswith("sk-"):
-            raise ValueError("OpenAI API key must start with 'sk-'")
+        """Allow optional provider API keys without enforcing a specific format."""
         return v
 
 
